@@ -23,16 +23,6 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
   const [retryCount, setRetryCount] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
 
-  // Stream health checking function
-  const checkStreamHealth = useCallback(async (url: string): Promise<boolean> => {
-    try {
-      const response = await fetch(url, { method: 'HEAD' });
-      return response.ok;
-    } catch {
-      return false;
-    }
-  }, []);
-
   // Enhanced CORS proxy handling with fallbacks
   const effectiveStreamUrl = useMemo(() => {
     const isInsecureStream = streamUrl.startsWith('http:') && window.location.protocol === 'https:';
@@ -71,17 +61,9 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
         setStatus('Loading...');
         setStreamHealth('unknown');
         setRetryCount(0);
-
-        // Check stream health
-        checkStreamHealth(newSrc).then(isHealthy => {
-          setStreamHealth(isHealthy ? 'healthy' : 'unhealthy');
-          if (!isHealthy) {
-            setStatus('Stream unavailable - trying to connect...');
-          }
-        });
       }
     }
-  }, [effectiveStreamUrl, checkStreamHealth]);
+  }, [effectiveStreamUrl]);
 
   const togglePlayPause = useCallback(async () => {
     if (!audioRef.current) return;
@@ -90,47 +72,32 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
       audioRef.current.pause();
       setStatus('Paused');
     } else {
-      // Check stream health before attempting to play
-      if (streamHealth === 'unhealthy' && retryCount < 3) {
+      // Reset health status when starting playback
+      if (streamHealth === 'unhealthy') {
+        setStreamHealth('unknown');
         setStatus('Retrying connection...');
-        setRetryCount(prev => prev + 1);
-
-        // Wait a bit before retrying
-        await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
-
-        if (audioRef.current) {
-          audioRef.current.load();
-        }
       }
 
       if (audioRef.current) {
         try {
           await audioRef.current.play();
-          setStatus('Playing');
+          // Health status will be updated by the 'playing' event handler
         } catch (err) {
           console.error("Audio play failed:", err);
           let errorMessage = 'Failed to load audio source.';
 
           if (streamUrl.startsWith('http:') && window.location.protocol === 'https:') {
             errorMessage += ' Insecure (HTTP) stream detected - using secure proxy.';
-          } else if (streamHealth === 'unhealthy') {
-            errorMessage += ' Stream appears to be unavailable.';
           } else {
             errorMessage += ' Please check the stream URL and try again.';
           }
 
           setStatus(errorMessage);
-
-          // Try alternative proxy if current one fails
-          if (retryCount < 2) {
-            setRetryCount(prev => prev + 1);
-            setStatus('Trying alternative proxy...');
-            // In a real implementation, you would cycle through different proxies here
-          }
+          setStreamHealth('unhealthy');
         }
       }
     }
-  }, [isPlaying, streamUrl, streamHealth, retryCount]);
+  }, [isPlaying, streamUrl, streamHealth]);
 
   useEffect(() => {
     setLogoError(false);
@@ -175,8 +142,17 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
         setVolume(audio.volume);
         setIsMuted(audio.muted);
     };
-    const handleWaiting = () => setStatus('Buffering...');
-    const handlePlaying = () => setStatus('Playing');
+    const handleWaiting = () => {
+        setStatus('Buffering...');
+        // Keep health status as is - if it was healthy, buffering doesn't mean it's unhealthy
+    };
+
+    const handlePlaying = () => {
+        setStatus('Playing');
+        setStreamHealth('healthy'); // Stream is healthy when actually playing
+        setRetryCount(0); // Reset retry count on successful play
+    };
+
     const handleError = (e: Event) => {
         const audio = e.target as HTMLAudioElement;
         const error = audio.error;
@@ -191,12 +167,15 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
               break;
             case MediaError.MEDIA_ERR_DECODE:
               errorMessage = 'Stream format not supported.';
+              setStreamHealth('unhealthy');
               break;
             case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
               errorMessage = 'Stream source not supported.';
+              setStreamHealth('unhealthy');
               break;
             default:
               errorMessage = 'Unknown audio error occurred.';
+              setStreamHealth('unhealthy');
           }
         }
 
@@ -218,12 +197,24 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
         }
     };
 
+    const handleLoadStart = () => {
+        setStatus('Loading...');
+        setStreamHealth('unknown'); // Still checking when loading starts
+    };
+
+    const handleCanPlay = () => {
+        setStatus('Ready to play');
+        // Don't change health status here - wait for actual playing event
+    };
+
     audio.addEventListener('play', handlePlay);
     audio.addEventListener('pause', handlePause);
     audio.addEventListener('volumechange', handleVolumeChange);
     audio.addEventListener('waiting', handleWaiting);
     audio.addEventListener('playing', handlePlaying);
     audio.addEventListener('error', handleError);
+    audio.addEventListener('loadstart', handleLoadStart);
+    audio.addEventListener('canplay', handleCanPlay);
 
     return () => {
       audio.removeEventListener('play', handlePlay);
@@ -232,6 +223,8 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
       audio.removeEventListener('waiting', handleWaiting);
       audio.removeEventListener('playing', handlePlaying);
       audio.removeEventListener('error', handleError);
+      audio.removeEventListener('loadstart', handleLoadStart);
+      audio.removeEventListener('canplay', handleCanPlay);
     };
   }, [streamUrl]);
 
@@ -292,7 +285,9 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
               <div className={`w-2 h-2 rounded-full ${
                 streamHealth === 'healthy' ? 'bg-green-500' :
                 streamHealth === 'unhealthy' ? 'bg-red-500' :
-                'bg-yellow-500 animate-pulse'
+                'bg-yellow-500'
+              } ${
+                streamHealth === 'unknown' ? 'animate-pulse' : ''
               }`} title={`Stream status: ${streamHealth}`} />
               <span className="text-xs text-gray-500 dark:text-gray-400">
                 {streamHealth === 'healthy' ? 'Connected' :
@@ -325,7 +320,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
                 <button
                     onClick={() => {
                         setStreamHealth('unknown');
-                        setStatus('Retrying...');
+                        setStatus('Retrying connection...');
                         setRetryCount(0);
                         if (audioRef.current) {
                             audioRef.current.load();

@@ -1,9 +1,2 @@
 /* ShoutStream Player Generator Styles */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
-/* Custom styles */
-body {
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  font-family: 'Inter', sans-serif;
-}
+/* This file is intentionally minimal as the project uses Tailwind CSS via CDN */

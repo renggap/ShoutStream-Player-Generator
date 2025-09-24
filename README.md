@@ -7,6 +7,10 @@
 <div align="center">
   <p><strong>Generate beautiful, shareable audio players for Shoutcast and Icecast streams</strong></p>
 </div>
+<img width="1103" height="648" alt="image" src="https://github.com/user-attachments/assets/5434f7b0-5ef8-4146-9717-85204f5e6528" />
+
+<img width="1051" height="720" alt="image" src="https://github.com/user-attachments/assets/cdb47a54-076f-4397-9bbb-9acd3f24cd02" />
+
 
 ## ✨ Features
 

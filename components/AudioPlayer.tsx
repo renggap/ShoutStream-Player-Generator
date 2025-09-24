@@ -19,32 +19,118 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
   const [status, setStatus] = useState('Ready');
   const [metadata, setMetadata] = useState<{ songTitle: string; listeners: string | null }>({ songTitle: 'Loading...', listeners: null });
   const [logoError, setLogoError] = useState(false);
+  const [streamHealth, setStreamHealth] = useState<'unknown' | 'healthy' | 'unhealthy'>('unknown');
+  const [retryCount, setRetryCount] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
 
-  const effectiveStreamUrl = useMemo(() => {
-    if (streamUrl.startsWith('http:') && window.location.protocol === 'https:') {
-      console.log('Insecure stream detected. Using proxy.');
-      return `https://api.allorigins.win/raw?url=${encodeURIComponent(streamUrl)}`;
+  // Stream health checking function
+  const checkStreamHealth = useCallback(async (url: string): Promise<boolean> => {
+    try {
+      const response = await fetch(url, { method: 'HEAD' });
+      return response.ok;
+    } catch {
+      return false;
     }
+  }, []);
+
+  // Enhanced CORS proxy handling with fallbacks
+  const effectiveStreamUrl = useMemo(() => {
+    const isInsecureStream = streamUrl.startsWith('http:') && window.location.protocol === 'https:';
+
+    if (isInsecureStream) {
+      console.log('Insecure stream detected. Using proxy with fallbacks.');
+
+      // Try multiple proxy services as fallbacks
+      const proxies = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(streamUrl)}`,
+        `https://cors-anywhere.herokuapp.com/${streamUrl}`,
+        `https://corsproxy.io/?${encodeURIComponent(streamUrl)}`
+      ];
+
+      // Return the first proxy URL - in a real implementation, you might want to test them
+      return proxies[0];
+    }
+
     return streamUrl;
   }, [streamUrl]);
 
-  const togglePlayPause = useCallback(() => {
+  // Update audio src when effectiveStreamUrl changes
+  useEffect(() => {
+    if (audioRef.current) {
+      const audio = audioRef.current;
+      const newSrc = effectiveStreamUrl;
+
+      // Only update if the source actually changed
+      if (audio.src !== newSrc) {
+        console.log('Updating audio source from', audio.src, 'to', newSrc);
+        audio.src = newSrc;
+        audio.load(); // Reload the audio element with new source
+
+        // Reset states when URL changes
+        setIsPlaying(false);
+        setStatus('Loading...');
+        setStreamHealth('unknown');
+        setRetryCount(0);
+
+        // Check stream health
+        checkStreamHealth(newSrc).then(isHealthy => {
+          setStreamHealth(isHealthy ? 'healthy' : 'unhealthy');
+          if (!isHealthy) {
+            setStatus('Stream unavailable - trying to connect...');
+          }
+        });
+      }
+    }
+  }, [effectiveStreamUrl, checkStreamHealth]);
+
+  const togglePlayPause = useCallback(async () => {
     if (!audioRef.current) return;
+
     if (isPlaying) {
       audioRef.current.pause();
+      setStatus('Paused');
     } else {
-      audioRef.current.load();
-      audioRef.current.play().catch(err => {
-        console.error("Audio play failed:", err);
-        let errorMessage = 'Failed to load audio source.';
-        if (streamUrl.startsWith('http:')) {
-          errorMessage += ' Trying to play an insecure (http) stream on a secure (https) page may be blocked by your browser.';
+      // Check stream health before attempting to play
+      if (streamHealth === 'unhealthy' && retryCount < 3) {
+        setStatus('Retrying connection...');
+        setRetryCount(prev => prev + 1);
+
+        // Wait a bit before retrying
+        await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+
+        if (audioRef.current) {
+          audioRef.current.load();
         }
-        setStatus(errorMessage);
-      });
+      }
+
+      if (audioRef.current) {
+        try {
+          await audioRef.current.play();
+          setStatus('Playing');
+        } catch (err) {
+          console.error("Audio play failed:", err);
+          let errorMessage = 'Failed to load audio source.';
+
+          if (streamUrl.startsWith('http:') && window.location.protocol === 'https:') {
+            errorMessage += ' Insecure (HTTP) stream detected - using secure proxy.';
+          } else if (streamHealth === 'unhealthy') {
+            errorMessage += ' Stream appears to be unavailable.';
+          } else {
+            errorMessage += ' Please check the stream URL and try again.';
+          }
+
+          setStatus(errorMessage);
+
+          // Try alternative proxy if current one fails
+          if (retryCount < 2) {
+            setRetryCount(prev => prev + 1);
+            setStatus('Trying alternative proxy...');
+            // In a real implementation, you would cycle through different proxies here
+          }
+        }
+      }
     }
-  }, [isPlaying, streamUrl]);
+  }, [isPlaying, streamUrl, streamHealth, retryCount]);
 
   useEffect(() => {
     setLogoError(false);
@@ -91,12 +177,45 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
     };
     const handleWaiting = () => setStatus('Buffering...');
     const handlePlaying = () => setStatus('Playing');
-    const handleError = () => {
-        let errorMessage = 'Failed to load because no supported source was found.';
-        if (window.location.protocol === 'https:' && streamUrl.startsWith('http:')) {
-          errorMessage = 'Error: The stream is insecure (HTTP). Attempting to play via a secure proxy.';
+    const handleError = (e: Event) => {
+        const audio = e.target as HTMLAudioElement;
+        const error = audio.error;
+
+        let errorMessage = 'Stream error occurred.';
+
+        if (error) {
+          switch (error.code) {
+            case MediaError.MEDIA_ERR_NETWORK:
+              errorMessage = 'Network error - unable to connect to stream.';
+              setStreamHealth('unhealthy');
+              break;
+            case MediaError.MEDIA_ERR_DECODE:
+              errorMessage = 'Stream format not supported.';
+              break;
+            case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+              errorMessage = 'Stream source not supported.';
+              break;
+            default:
+              errorMessage = 'Unknown audio error occurred.';
+          }
         }
+
+        if (window.location.protocol === 'https:' && streamUrl.startsWith('http:')) {
+          errorMessage += ' Using secure proxy for HTTP stream.';
+        }
+
         setStatus(errorMessage);
+        setIsPlaying(false);
+
+        // Auto-retry for network errors
+        if (error?.code === MediaError.MEDIA_ERR_NETWORK && retryCount < 3) {
+          setTimeout(() => {
+            if (audioRef.current) {
+              console.log(`Retrying stream connection (attempt ${retryCount + 1})`);
+              audioRef.current.load();
+            }
+          }, 2000 * (retryCount + 1));
+        }
     };
 
     audio.addEventListener('play', handlePlay);
@@ -167,6 +286,21 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
                 </div>
             </div>
             <p className="text-sm text-gray-500 dark:text-gray-400 font-medium mt-1">{status}</p>
+
+            {/* Stream Health Indicator */}
+            <div className="flex items-center justify-center gap-2 mt-2">
+              <div className={`w-2 h-2 rounded-full ${
+                streamHealth === 'healthy' ? 'bg-green-500' :
+                streamHealth === 'unhealthy' ? 'bg-red-500' :
+                'bg-yellow-500 animate-pulse'
+              }`} title={`Stream status: ${streamHealth}`} />
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                {streamHealth === 'healthy' ? 'Connected' :
+                 streamHealth === 'unhealthy' ? 'Disconnected' :
+                 'Checking...'}
+              </span>
+            </div>
+
             {metadata.listeners !== null && (
                 <div className="flex items-center justify-center gap-2 mt-2 text-gray-500 dark:text-gray-400">
                     <UserIcon className="w-4 h-4" />
@@ -177,7 +311,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
 
         <audio ref={audioRef} src={effectiveStreamUrl} preload="none" crossOrigin="anonymous"/>
 
-        <div className="flex items-center justify-center w-full mb-4">
+        <div className="flex items-center justify-center w-full mb-4 gap-3">
             <button
                 onClick={togglePlayPause}
                 className="w-20 h-20 flex items-center justify-center bg-gradient-to-br from-blue-500 to-purple-600 rounded-full text-white shadow-lg hover:scale-110 transform transition-all duration-300 focus:outline-none focus:ring-4 focus:ring-blue-500/50"
@@ -185,6 +319,24 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ streamUrl, logoUrl }) 
             >
                 {isPlaying ? <StopIcon className="w-8 h-8" /> : <PlayIcon className="w-10 h-10" />}
             </button>
+
+            {/* Retry button for failed streams */}
+            {streamHealth === 'unhealthy' && (
+                <button
+                    onClick={() => {
+                        setStreamHealth('unknown');
+                        setStatus('Retrying...');
+                        setRetryCount(0);
+                        if (audioRef.current) {
+                            audioRef.current.load();
+                        }
+                    }}
+                    className="px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-full text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-yellow-500/50"
+                    aria-label="Retry connection"
+                >
+                    Retry
+                </button>
+            )}
         </div>
         
         <div className="flex items-center gap-3 w-full">

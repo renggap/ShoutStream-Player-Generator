@@ -10,38 +10,85 @@ export const HomePage: React.FC<HomePageProps> = ({ onGenerate }) => {
   const [logoUrl, setLogoUrl] = useState('');
   const [error, setError] = useState('');
 
+  const validateStreamUrl = (url: string): { isValid: boolean; error?: string; normalizedUrl?: string } => {
+    if (!url.trim()) {
+      return { isValid: false, error: 'Please enter a stream URL.' };
+    }
+
+    try {
+      const parsedUrl = new URL(url);
+
+      // Check if it's a valid HTTP/HTTPS URL
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return { isValid: false, error: 'Stream URL must use HTTP or HTTPS protocol.' };
+      }
+
+      // Check for valid hostname
+      if (!parsedUrl.hostname) {
+        return { isValid: false, error: 'Please enter a valid stream URL with a hostname.' };
+      }
+
+      // Normalize the URL
+      let normalizedUrl = url.trim();
+
+      // Heuristic: if it looks like a base URL, append the common stream path
+      if (!normalizedUrl.includes(';stream') && !normalizedUrl.split('/').pop()?.includes('.')) {
+        if (!normalizedUrl.endsWith('/')) {
+          normalizedUrl += '/';
+        }
+        normalizedUrl += ';stream.mp3';
+      }
+
+      return { isValid: true, normalizedUrl };
+    } catch (error) {
+      return { isValid: false, error: 'Please enter a valid URL format (e.g., http://stream.example.com:8000/)' };
+    }
+  };
+
+  const validateLogoUrl = (url: string): { isValid: boolean; error?: string } => {
+    if (!url.trim()) return { isValid: true }; // Optional field
+
+    try {
+      const parsedUrl = new URL(url);
+
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return { isValid: false, error: 'Logo URL must use HTTP or HTTPS protocol.' };
+      }
+
+      // Check if it's likely an image URL
+      const pathname = parsedUrl.pathname.toLowerCase();
+      const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico'];
+      const hasImageExtension = imageExtensions.some(ext => pathname.includes(ext));
+
+      if (!hasImageExtension) {
+        console.warn('Logo URL does not appear to be an image file, but allowing it anyway.');
+      }
+
+      return { isValid: true };
+    } catch (error) {
+      return { isValid: false, error: 'Please enter a valid logo URL.' };
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!streamUrl.trim()) {
-      setError('Please enter a stream URL.');
+
+    // Validate stream URL
+    const streamValidation = validateStreamUrl(streamUrl);
+    if (!streamValidation.isValid) {
+      setError(streamValidation.error!);
       return;
     }
-    
-    try {
-      // Validate stream URL
-      new URL(streamUrl);
-      
-      // Validate optional logo URL if provided
-      if(logoUrl.trim()){
-        new URL(logoUrl);
-      }
-      
-      setError('');
 
-      let finalStreamUrl = streamUrl.trim();
-      // Heuristic: if it looks like a base URL, append the common stream path.
-      if (!finalStreamUrl.includes(';stream') && !finalStreamUrl.split('/').pop()?.includes('.')) {
-          if (!finalStreamUrl.endsWith('/')) {
-              finalStreamUrl += '/';
-          }
-          finalStreamUrl += ';stream.mp3';
-      }
-
-      onGenerate(finalStreamUrl, logoUrl.trim());
-
-    } catch (_) {
-      setError('Please enter a valid URL.');
+    // Validate logo URL if provided
+    const logoValidation = validateLogoUrl(logoUrl);
+    if (!logoValidation.isValid) {
+      setError(logoValidation.error!);
+      return;
     }
+
+    setError('');
+    onGenerate(streamValidation.normalizedUrl!, logoUrl.trim());
   };
 
   return (
